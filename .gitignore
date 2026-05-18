@@ -1,0 +1,11 @@
+.venv/
+.DS_Store
+__pycache__/
+*.py[cod]
+.env
+.DS_Store
+models/*.joblib
+data/cache/
+features_*.csv
+*.log
+old_code.py

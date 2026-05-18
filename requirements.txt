@@ -1,0 +1,16 @@
+polars>=1.0.0
+pandas-ta>=0.3.14b
+scikit-learn>=1.4.0
+matplotlib>=3.8.0
+torch>=2.2.0
+transformers>=4.40.0
+accelerate>=0.30.0
+finnhub-python>=2.4.0
+xgboost>=2.1.0
+yfinance>=0.2.40
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+streamlit>=1.39.0
+plotly>=5.24.0
+requests>=2.31.0
+joblib>=1.4.0
