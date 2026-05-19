@@ -12,8 +12,8 @@ import yfinance as yf
 API_URL = os.environ.get("API_URL", "http://127.0.0.1:8000")
 
 st.set_page_config(page_title="Stock direction", layout="wide")
-st.title("Tech stock direction")
-st.caption("Candlesticks from Yahoo Finance · prediction from your FastAPI `/predict` service")
+st.title("Tech stock forecast")
+st.caption("Candlesticks from Yahoo Finance · next-day price forecast from `/predict`")
 
 ticker = st.text_input("Ticker", value="MSFT").strip().upper()
 if st.button("Run", type="primary"):
@@ -56,22 +56,33 @@ if st.button("Run", type="primary"):
         except requests.RequestException as exc:
             st.error(f"Could not reach API at {API_URL}: {exc}")
         else:
-            prob = float(data.get("probability_up", 0.0))
             label = data.get("prediction", "?")
+            pred_price = data.get("predicted_next_close")
+            pct = data.get("predicted_pct_change")
+            today = data.get("today_adj_close")
             as_of = data.get("as_of_date", "")
 
             st.markdown("### Next session (from model)")
-            m1, m2, m3 = st.columns(3)
+            m1, m2, m3, m4 = st.columns(4)
             with m1:
                 st.metric(
                     label="Direction",
                     value=label,
-                    help="Up = model expects next Adj Close > current Adj Close (training definition).",
+                    help="Up if predicted next Adj Close > today's Adj Close.",
                 )
             with m2:
-                st.metric(label="P(Up)", value=f"{prob*100:.1f}%")
+                st.metric(
+                    label="Predicted next close",
+                    value=f"${pred_price:,.2f}" if pred_price is not None else "—",
+                )
             with m3:
-                st.metric(label="Features as of", value=str(as_of))
+                st.metric(
+                    label="Predicted % change",
+                    value=f"{pct:+.2f}%" if pct is not None else "—",
+                )
+            with m4:
+                st.metric(label="Today adj. close", value=f"${today:,.2f}" if today else "—")
+            st.caption(f"Features as of {as_of}")
 
             bt = data.get("backtest") or {}
             dates = bt.get("dates") or []

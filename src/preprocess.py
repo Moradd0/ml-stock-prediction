@@ -9,6 +9,8 @@ import numpy as np
 import polars as pl
 from sklearn.preprocessing import StandardScaler
 
+from src.features import TARGET_PRICE_COLUMN
+
 _RAW_FIELD_NAMES = frozenset({"Open", "High", "Low", "Close", "Volume", "Adj Close"})
 
 
@@ -29,7 +31,7 @@ def _raw_price_columns(names: Iterable[str]) -> list[str]:
 def split_features_and_target(
     df: pl.DataFrame,
     *,
-    target_column: str = "Target_Direction",
+    target_column: str = TARGET_PRICE_COLUMN,
     date_column: str = "Date",
 ) -> tuple[pl.DataFrame, pl.Series]:
     """

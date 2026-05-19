@@ -14,6 +14,8 @@ Examples
     python scripts/run.py pipeline MSFT          # check → train (if needed) → predict
     python scripts/run.py api                    # start FastAPI (blocking)
     python scripts/run.py ui                     # start Streamlit (blocking)
+
+Roadmap (model compare, regression, tuning): docs/roadmap_todo.py
 """
 
 from __future__ import annotations
@@ -251,6 +253,15 @@ def build_parser() -> argparse.ArgumentParser:
     cmp.add_argument("--save-bundles", action="store_true")
     cmp.set_defaults(func=cmd_compare)
 
+    cl = sub.add_parser("compare-losses", help="Compare MAE vs squared vs Huber regression loss")
+    cl.add_argument("ticker", nargs="?", default="MSFT")
+    cl.add_argument("--benchmark", default="QQQ")
+    cl.add_argument("--period", default="5y")
+    cl.add_argument("--losses", default="mae,squared,huber")
+    cl.add_argument("--huber-slope", type=float, default=None)
+    cl.add_argument("--out", default=None, help="Save JSON results")
+    cl.set_defaults(func=cmd_compare_losses)
+
     return p
 
 
@@ -262,6 +273,26 @@ def cmd_compare(args: argparse.Namespace) -> None:
         argv.append("--save-bundles")
     sys.argv = ["compare_periods", *argv]
     compare_main()
+
+
+def cmd_compare_losses(args: argparse.Namespace) -> None:
+    from scripts.compare_losses import main as compare_losses_main
+
+    argv = [
+        args.ticker,
+        "--benchmark",
+        args.benchmark,
+        "--period",
+        args.period,
+        "--losses",
+        args.losses,
+    ]
+    if args.huber_slope is not None:
+        argv.extend(["--huber-slope", str(args.huber_slope)])
+    if args.out:
+        argv.extend(["--out", args.out])
+    sys.argv = ["compare_losses", *argv]
+    compare_losses_main()
 
 
 def main() -> None:

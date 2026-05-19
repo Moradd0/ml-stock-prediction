@@ -1,4 +1,4 @@
-"""Model building blocks (XGBoost baseline). Import ``dl_utils`` only when PyTorch is installed."""
+"""Model building blocks (XGBoost classifier/regressor). Import ``dl_utils`` only when PyTorch is installed."""
 
 from src.models.baseline_model import (
     init_xgb_classifier,

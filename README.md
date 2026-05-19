@@ -39,6 +39,7 @@ Or with Make: `make pipeline TICKER=MSFT`, `make predict`, `make compare`, `make
 python scripts/run.py compare MSFT
 # optional: models/bundle_MSFT_5y.joblib etc.
 python scripts/run.py compare MSFT --save-bundles
+python scripts/run.py compare-losses MSFT --period 5y   # MAE vs RMSE vs Huber
 ```
 
 **Sentiment cache:** Finnhub headlines + FinBERT scores + daily `Daily_Sentiment` are stored under `data/cache/{TICKER}/` (gitignored). First run is slow; same-day reruns reuse cache. Refresh tomorrow or delete `data/cache/MSFT/` to refetch.
@@ -78,9 +79,9 @@ flowchart LR
   FE --> API
 ```
 
-**Label:** `Target_Direction` = 1 if the **next** session’s adjusted close is above today’s, else 0.
+**Label:** `Target_Next_Adj_Close` = next session adjusted close (regression). Training minimizes **MAE** (mean absolute price error). **Direction** and **% change** are derived at inference from predicted vs today’s close.
 
-**Inference:** Latest feature row (including recent `Daily_Sentiment`) → scaled → XGBoost → Up/Down + probability.
+**Inference:** Latest feature row → scaled → XGBoost regressor → predicted next price, % change, Up/Down.
 
 ---
 
@@ -92,15 +93,16 @@ flowchart LR
 | [`src/features.py`](src/features.py) | Feature engineering + FinBERT sentiment → `Daily_Sentiment` |
 | [`src/peer_maps.py`](src/peer_maps.py) | Static competitor / partner ticker lists |
 | [`src/preprocess.py`](src/preprocess.py) | X/y split, chronological train/val/test, scaling |
-| [`src/train_bundle.py`](src/train_bundle.py) | Train XGBoost and write `models/bundle_{TICKER}.joblib` |
+| [`src/train_bundle.py`](src/train_bundle.py) | Train XGBoost regressor (next-day adj. close) → `models/bundle_{TICKER}.joblib` |
 | [`src/evaluate.py`](src/evaluate.py) | Metrics and simple open→close backtest |
 | [`src/models/`](src/models/) | Model helpers (`baseline_model`, optional DL utils) |
 | [`app_api.py`](app_api.py) | FastAPI: `/health`, `/predict` |
 | [`app_ui.py`](app_ui.py) | Streamlit dashboard |
 | [`scripts/predict_cli.py`](scripts/predict_cli.py) | Terminal JSON (in-process or `--http`) |
 | [`scripts/export_feature_dataset.py`](scripts/export_feature_dataset.py) | Export engineered CSV for reports |
+| [`docs/roadmap_todo.py`](docs/roadmap_todo.py) | Comment-only roadmap: model comparison + regression refactor checklist |
+| [`docs/FEATURES_REPORT.md`](docs/FEATURES_REPORT.md) | Full feature catalog and quarterly data notes |
 | [`models/`](models/) | Trained bundles (gitignore large `.joblib` in real repos) |
-| [`old_code.py`](old_code.py) | Legacy exploratory script — **do not commit secrets** |
 
 Add new capabilities by extending `src/` and optional `scripts/`; keep this table updated.
 

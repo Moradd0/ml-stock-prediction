@@ -416,6 +416,12 @@ def _merge_daily_sentiment(
     )
 
 
+# Primary regression target: next session adjusted close (known only after that session).
+TARGET_PRICE_COLUMN = "Target_Next_Adj_Close"
+# Derived classification label for reporting / direction accuracy.
+TARGET_DIRECTION_COLUMN = "Target_Direction"
+
+
 def _ordered_unique(iterable: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
@@ -435,7 +441,8 @@ def engineer_features(
     use_fundamentals: bool = True,
 ) -> pl.DataFrame:
     """
-    Build leakage-safe features and ``Target_Direction`` from ``fetch_aligned_market_data`` output.
+    Build leakage-safe features and price target ``Target_Next_Adj_Close`` from
+    ``fetch_aligned_market_data`` output.
 
     Includes **Finnhub headlines** (last 30 days) scored with **ProsusAI/finbert** as
     ``Daily_Sentiment`` (daily mean of mapped scores: positive = 1, neutral = 0, negative = -1),
@@ -444,8 +451,9 @@ def engineer_features(
     Also includes **dividend / split** proxies on the target and **competitor / partner** return
     panels (see ``src.peer_maps``) when those columns are present on ``df``.
 
-    ``Target_Direction`` is 1 if the *next* session's target ``Adj Close`` exceeds today's
-    ``Adj Close``, else 0. Peer inputs use only prices through each session's close; peer
+    ``Target_Next_Adj_Close`` is the *next* session's ``target_Adj Close`` (regression label).
+    ``Target_Direction`` is derived (1 if next close > today). Peer inputs use only prices
+    through each session's close; peer
     aggregates apply ``.shift(1)`` so row ``t`` does not embed same-day peer closes in the
     contemporaneous mean (mirrors the spirit of the reference coursework pipeline).
 
@@ -455,7 +463,7 @@ def engineer_features(
         Polars frame from ``data_fetch.fetch_aligned_market_data`` (target, benchmark, macro,
         optional ``pcomp_*`` / ``psupp_*`` Adj Close joins, ``target_Dividends``, splits).
     keep_incomplete_target
-        If True, keep the last row even when ``Target_Direction`` is null (inference).
+        If True, keep the last row even when ``Target_Next_Adj_Close`` is null (inference).
     target_ticker
         Target symbol for Finnhub news + FinBERT ``Daily_Sentiment`` (``news_days`` fetch +
         per-session rolling calendar mean). If ``None``, ``Daily_Sentiment`` is ``0.0``.
@@ -479,9 +487,13 @@ def engineer_features(
             (adj / adj.shift(1) - 1.0).alias("daily_return"),
             (bench_adj / bench_adj.shift(1) - 1.0).alias("benchmark_daily_return"),
             (macro_px / macro_px.shift(1) - 1.0).alias("treasury_yield_daily_change"),
-            (pl.col("target_Adj Close").shift(-1) > adj)
+            adj.shift(-1).alias(TARGET_PRICE_COLUMN),
+        ]
+    ).with_columns(
+        [
+            (pl.col(TARGET_PRICE_COLUMN) > adj)
             .cast(pl.Int8)
-            .alias("Target_Direction"),
+            .alias(TARGET_DIRECTION_COLUMN),
         ]
     ).with_columns(
         [
@@ -567,12 +579,14 @@ def engineer_features(
         "treasury_yield_daily_change",
     ]
 
+    target_cols = [TARGET_PRICE_COLUMN, TARGET_DIRECTION_COLUMN]
     feature_cols = _ordered_unique(
-        base_feature_cols + qtr_cols + div_feature_cols + comp_meta + supp_meta + ["Target_Direction"]
+        base_feature_cols + qtr_cols + div_feature_cols + comp_meta + supp_meta + target_cols
     )
 
-    float_cols = [c for c in feature_cols if c != "Target_Direction"]
+    float_cols = [c for c in feature_cols if c not in target_cols]
     out = enriched.select(["Date"] + feature_cols)
     out = out.with_columns([pl.col(c).fill_nan(None) for c in float_cols])
-    null_subset = float_cols if keep_incomplete_target else feature_cols
-    return out.drop_nulls(subset=null_subset)
+    if keep_incomplete_target:
+        return out.drop_nulls(subset=float_cols)
+    return out.drop_nulls(subset=feature_cols)

@@ -1,4 +1,4 @@
-"""Train XGBoost + scaler on historical data and save artifacts for the API."""
+"""Train XGBoost regressor + scaler on historical data and save artifacts for the API."""
 
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ load_project_env()
 
 from src.data_fetch import fetch_aligned_market_data
 from src.evaluate import save_model_bundle
-from src.features import engineer_features
-from src.models.baseline_model import init_xgb_classifier, train_xgb_baseline
+from src.features import TARGET_PRICE_COLUMN, engineer_features
+from src.models.regression_model import init_xgb_regressor, train_xgb_regressor
 from src.preprocess import (
     chronological_train_val_test_split,
     scale_train_val_test,
@@ -35,21 +35,21 @@ def train_and_save_bundle(
     bundle_filename: str | None = None,
 ) -> Path:
     """
-    Chronological split + scaler fit on train only + XGBoost with early stopping, then save.
+    Chronological split + scaler fit on train only + XGBoost regressor (MAE loss), then save.
 
-    Writes ``{out_dir}/bundle_{TICKER}.joblib`` with ``model``, ``scaler``, ``feature_columns``,
-    ``ticker``, ``benchmark``, and ``period`` (used by ``/predict`` for consistent history).
+    Predicts ``Target_Next_Adj_Close`` (next session adjusted close). Writes
+    ``{out_dir}/bundle_{TICKER}.joblib`` with ``task=regression``.
     """
     raw = fetch_aligned_market_data(ticker.upper(), benchmark.upper(), period=period)
     feat = engineer_features(raw, keep_incomplete_target=False, target_ticker=ticker.upper())
-    X, y = split_features_and_target(feat)
+    X, y = split_features_and_target(feat, target_column=TARGET_PRICE_COLUMN)
     feature_columns = list(X.columns)
     X_train, X_val, X_test, y_train, y_val, y_test = chronological_train_val_test_split(X, y)
     Xtr, Xva, Xte, scaler = scale_train_val_test(X_train, X_val, X_test)
 
-    clf = init_xgb_classifier()
-    train_xgb_baseline(
-        clf,
+    reg = init_xgb_regressor()
+    train_xgb_regressor(
+        reg,
         Xtr,
         y_train,
         Xva,
@@ -65,7 +65,9 @@ def train_and_save_bundle(
     save_model_bundle(
         path,
         {
-            "model": clf,
+            "task": "regression",
+            "target_column": TARGET_PRICE_COLUMN,
+            "model": reg,
             "scaler": scaler,
             "feature_columns": feature_columns,
             "ticker": ticker.upper(),
@@ -74,13 +76,16 @@ def train_and_save_bundle(
             "news_days": 365,
             "lookback_calendar_days": 14,
             "report_lag_days": 45,
+            "loss": "mae",
         },
     )
     return path
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train and save XGBoost bundle for /predict API.")
+    parser = argparse.ArgumentParser(
+        description="Train and save XGBoost regressor (next-day adj. close) for /predict API."
+    )
     parser.add_argument("ticker", help="Target ticker, e.g. MSFT")
     parser.add_argument("--benchmark", default="QQQ")
     parser.add_argument("--period", default="10y")

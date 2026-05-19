@@ -17,6 +17,70 @@ from sklearn.metrics import (
 )
 
 
+def regression_metrics_summary(
+    y_true: np.ndarray | pl.Series,
+    y_pred: np.ndarray | pl.Series,
+) -> dict[str, Any]:
+    """Price-level errors: MAE (primary loss), RMSE, MAPE, R²."""
+    yt = np.asarray(y_true, dtype=float).ravel()
+    yp = np.asarray(y_pred, dtype=float).ravel()
+    if yt.shape != yp.shape:
+        raise ValueError("y_true and y_pred must have the same shape.")
+    err = yp - yt
+    mae = float(np.mean(np.abs(err)))
+    rmse = float(np.sqrt(np.mean(err**2)))
+    denom = np.maximum(np.abs(yt), 1e-12)
+    mape = float(np.mean(np.abs(err) / denom) * 100.0)
+    ss_res = float(np.sum(err**2))
+    ss_tot = float(np.sum((yt - np.mean(yt)) ** 2))
+    r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
+    return {
+        "mae": mae,
+        "rmse": rmse,
+        "mape_pct": mape,
+        "r2": r2,
+        "mean_signed_error": float(np.mean(err)),
+    }
+
+
+def regression_to_user_outputs(
+    predicted_next_close: float,
+    today_adj_close: float,
+) -> dict[str, Any]:
+    """
+    Map a predicted next-session adj. close to UI fields.
+
+    ``predicted_pct_change`` is percent move from today's close to the prediction.
+    """
+    today = float(today_adj_close)
+    pred = float(predicted_next_close)
+    if today <= 0:
+        pct = 0.0
+    else:
+        pct = (pred / today - 1.0) * 100.0
+    direction = 1 if pred > today else 0
+    return {
+        "predicted_next_close": round(pred, 4),
+        "predicted_pct_change": round(pct, 4),
+        "prediction": "Up" if direction == 1 else "Down",
+        "direction": direction,
+    }
+
+
+def direction_accuracy_from_prices(
+    y_true_price: np.ndarray,
+    y_pred_price: np.ndarray,
+    today_adj_close: np.ndarray,
+) -> dict[str, float]:
+    """Compare direction implied by predicted vs true next close (vs today's close)."""
+    today = np.asarray(today_adj_close, dtype=float).ravel()
+    yt = np.asarray(y_true_price, dtype=float).ravel()
+    yp = np.asarray(y_pred_price, dtype=float).ravel()
+    true_dir = (yt > today).astype(int)
+    pred_dir = (yp > today).astype(int)
+    return classification_metrics_summary(true_dir, pred_dir)
+
+
 def classification_metrics_summary(
     y_true: np.ndarray | pl.Series,
     y_pred: np.ndarray | pl.Series,
@@ -49,6 +113,8 @@ def append_next_session_prices(feat: pl.DataFrame, raw: pl.DataFrame) -> pl.Data
     r = raw.sort("Date").select(
         [
             "Date",
+            pl.col("target_Adj Close").alias("today_adj_close"),
+            pl.col("target_Adj Close").shift(-1).alias("next_adj_close"),
             pl.col("target_Open").shift(-1).alias("next_open"),
             pl.col("target_Close").shift(-1).alias("next_close"),
         ]
