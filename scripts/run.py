@@ -77,6 +77,7 @@ def cmd_train(args: argparse.Namespace) -> None:
         benchmark=args.benchmark,
         period=args.period,
         out_dir=args.out_dir,
+        tune=not getattr(args, "no_tune", False),
     )
     print(f"Saved {path}")
 
@@ -207,6 +208,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--benchmark", default="QQQ")
     t.add_argument("--period", default="10y", help="Yahoo history window (stored in bundle)")
     t.add_argument("--out-dir", default="models")
+    t.add_argument("--no-tune", action="store_true", help="Skip light hyperparameter search")
     t.set_defaults(func=cmd_train)
 
     pr = sub.add_parser("predict", help="Run inference + test backtest (slow: FinBERT)")

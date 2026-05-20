@@ -10,6 +10,8 @@ import polars as pl
 from sklearn.metrics import mean_absolute_error
 from xgboost import XGBRegressor
 
+from src.evaluate import tune_direction_threshold
+
 logger = logging.getLogger(__name__)
 
 # Training objectives supported by compare-losses / init_xgb_regressor.
@@ -37,14 +39,30 @@ LOSS_CONFIGS: dict[str, dict[str, Any]] = {
 
 def default_huber_slope(y_train: np.ndarray | pl.Series) -> float:
     """
-    Huber transition in the same units as ``y`` (dollars for adj. close).
+    Huber transition in the same units as ``y``.
 
-    ``reg:pseudohubererror`` expects ``huber_slope`` near the typical target scale;
-    values ≪ price level (e.g. 1–20) cause unstable fits on raw prices.
+    For ``Target_Next_Return`` (simple returns), use ~typical daily |return|;
+    for raw prices use median price (legacy).
     """
     y = _to_numpy_y(y_train)
-    med = float(np.median(y))
-    return max(med, 1.0)
+    med_abs = float(np.median(np.abs(y)))
+    if med_abs < 0.5:
+        return max(med_abs, 1e-4)
+    return max(med_abs, 1.0)
+
+
+# Hyperparameter grid: tuned on validation return MAE, then direction threshold on val.
+TUNE_PARAM_GRID: list[dict[str, Any]] = [
+    {"max_depth": 3, "learning_rate": 0.03, "subsample": 0.75, "colsample_bytree": 0.75, "reg_lambda": 5.0, "min_child_weight": 5},
+    {"max_depth": 4, "learning_rate": 0.03, "subsample": 0.8, "colsample_bytree": 0.8, "reg_lambda": 3.0, "min_child_weight": 3},
+    {"max_depth": 4, "learning_rate": 0.05, "subsample": 0.85, "colsample_bytree": 0.85, "reg_lambda": 1.0, "min_child_weight": 1},
+    {"max_depth": 5, "learning_rate": 0.05, "subsample": 0.9, "colsample_bytree": 0.9, "reg_lambda": 1.0, "min_child_weight": 1},
+    {"max_depth": 5, "learning_rate": 0.03, "subsample": 0.8, "colsample_bytree": 0.7, "reg_lambda": 2.0, "min_child_weight": 2},
+    {"max_depth": 6, "learning_rate": 0.03, "subsample": 0.8, "colsample_bytree": 0.8, "reg_lambda": 2.0, "min_child_weight": 1},
+]
+
+# Among configs within this factor of the best validation MAE, pick best direction BA.
+TUNE_MAE_TOLERANCE = 1.08
 
 
 def init_xgb_regressor(
@@ -113,7 +131,7 @@ def init_xgb_regressor_for_loss(
     if loss_key == "huber" and slope is None and y_train_for_huber is not None:
         slope = default_huber_slope(y_train_for_huber)
     elif loss_key == "huber" and slope is None:
-        slope = 10.0
+        slope = 0.01
     return init_xgb_regressor(
         objective=cfg["objective"],
         eval_metric=cfg["eval_metric"],
@@ -182,3 +200,82 @@ def train_xgb_regressor(
             logger.warning("Could not compute sklearn MAE: %s", exc)
 
     return reg
+
+
+def fit_huber_regressor_tuned(
+    X_train: np.ndarray | pl.DataFrame,
+    y_train: np.ndarray | pl.Series,
+    X_val: np.ndarray | pl.DataFrame,
+    y_val: np.ndarray | pl.Series,
+    *,
+    feature_names: list[str] | None = None,
+    tune: bool = True,
+    early_stopping_rounds: int = 20,
+) -> tuple[XGBRegressor, dict[str, Any]]:
+    """
+    Huber regressor with hyperparameter search on validation return MAE.
+
+    Among configs within :data:`TUNE_MAE_TOLERANCE` of the best MAE, keeps the one with
+    highest validation balanced direction accuracy (after :func:`tune_direction_threshold`).
+    The winning threshold is stored in the returned metadata for inference/backtest.
+    """
+    slope = default_huber_slope(y_train)
+    grid = TUNE_PARAM_GRID if tune else [TUNE_PARAM_GRID[3]]
+    y_val_np = _to_numpy_y(y_val)
+    y_val_dir = (y_val_np > 0.0).astype(int)
+
+    candidates: list[tuple[float, float, XGBRegressor, dict[str, Any], float, dict[str, Any]]] = []
+
+    for params in grid:
+        reg = init_xgb_regressor_for_loss(
+            "huber",
+            huber_slope=slope,
+            y_train_for_huber=y_train,
+            n_estimators=500,
+            **params,
+        )
+        train_xgb_regressor(
+            reg,
+            X_train,
+            y_train,
+            X_val,
+            y_val,
+            feature_names=feature_names,
+            early_stopping_rounds=early_stopping_rounds,
+        )
+        pred = reg.predict(_to_numpy_X(X_val))
+        mae = float(mean_absolute_error(y_val_np, pred))
+        thresh, thresh_meta = tune_direction_threshold(y_val_dir, pred)
+        ba = float(thresh_meta.get("val_balanced_accuracy", float("nan")))
+        candidates.append((mae, ba, reg, dict(params), thresh, thresh_meta))
+
+    if not candidates:
+        raise RuntimeError("Hyperparameter search did not fit any model.")
+
+    best_mae = min(c[0] for c in candidates)
+    mae_cutoff = best_mae * TUNE_MAE_TOLERANCE
+    eligible = [c for c in candidates if c[0] <= mae_cutoff]
+    eligible.sort(key=lambda c: (-c[1], c[0]))
+    _, best_ba, best_reg, best_params, direction_threshold, thresh_meta = eligible[0]
+
+    mean_pred_val = float(np.mean(best_reg.predict(_to_numpy_X(X_val))))
+    meta: dict[str, Any] = {
+        "best_params": best_params,
+        "huber_slope": slope,
+        "val_mae": float(mean_absolute_error(y_val_np, best_reg.predict(_to_numpy_X(X_val)))),
+        "val_mae_best_in_grid": best_mae,
+        "val_balanced_accuracy": best_ba,
+        "direction_threshold": direction_threshold,
+        "direction_threshold_meta": thresh_meta,
+        "val_mean_predicted_return": mean_pred_val,
+        "loss": "huber",
+    }
+    logger.info(
+        "Selected params %s (val MAE=%.6f, val BA=%.4f, direction_threshold=%.6f, huber_slope=%.6f)",
+        best_params,
+        meta["val_mae"],
+        best_ba,
+        direction_threshold,
+        slope,
+    )
+    return best_reg, meta

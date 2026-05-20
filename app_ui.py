@@ -84,6 +84,30 @@ if st.button("Run", type="primary"):
                 st.metric(label="Today adj. close", value=f"${today:,.2f}" if today else "—")
             st.caption(f"Features as of {as_of}")
 
+            summary = data.get("backtest_summary") or {}
+            if summary.get("strategies"):
+                st.markdown("### Backtest summary (held-out test window)")
+                for row in summary["strategies"]:
+                    st.markdown(
+                        f"**{row['name']}** — return **{row['return_pct']}%**, "
+                        f"final capital **${row['final_capital']:,.2f}**  \n"
+                        f"_{row.get('description', '')}_"
+                    )
+                counts = summary.get("prediction_counts") or {}
+                thresh = summary.get("direction_threshold")
+                cap_parts = [
+                    f"Initial capital ${summary.get('initial_capital', 10000):,.0f}",
+                    f"{summary.get('test_sessions', '?')} sessions",
+                ]
+                if counts:
+                    cap_parts.append(
+                        f"predicted Up {counts.get('n_predicted_up', '?')} / "
+                        f"Down {counts.get('n_predicted_down', '?')}"
+                    )
+                if thresh is not None:
+                    cap_parts.append(f"direction threshold {thresh:.6f}")
+                st.caption(" · ".join(cap_parts))
+
             bt = data.get("backtest") or {}
             dates = bt.get("dates") or []
             eq_s = bt.get("equity_strategy") or []
@@ -162,5 +186,11 @@ if st.button("Run", type="primary"):
                     f"{bt.get('max_drawdown_strategy', float('nan'))*100:.2f}%",
                 )
 
-            with st.expander("Test-set classification metrics"):
-                st.json(data.get("test_classification_metrics", {}))
+            with st.expander("Test-set metrics"):
+                st.json(
+                    {
+                        "direction": data.get("test_direction_metrics", {}),
+                        "return": data.get("test_return_metrics", {}),
+                        "price": data.get("test_regression_metrics", {}),
+                    }
+                )

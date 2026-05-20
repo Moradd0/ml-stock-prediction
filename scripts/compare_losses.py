@@ -18,10 +18,16 @@ load_project_env()
 from src.data_fetch import fetch_aligned_market_data  # noqa: E402
 from src.evaluate import (  # noqa: E402
     append_next_session_prices,
-    direction_accuracy_from_prices,
-    regression_metrics_summary,
+    classification_metrics_summary,
+    direction_from_return_predictions,
+    return_metrics_summary,
 )
-from src.features import TARGET_PRICE_COLUMN, engineer_features  # noqa: E402
+from src.features import (  # noqa: E402
+    TARGET_DIRECTION_COLUMN,
+    TARGET_PRICE_COLUMN,
+    TARGET_RETURN_COLUMN,
+    engineer_features,
+)
 from src.models.regression_model import (  # noqa: E402
     LOSS_CONFIGS,
     default_huber_slope,
@@ -52,7 +58,7 @@ def evaluate_loss(
 ) -> dict:
     raw = fetch_aligned_market_data(ticker.upper(), benchmark.upper(), period=period)
     feat = engineer_features(raw, keep_incomplete_target=False, target_ticker=ticker.upper())
-    X, y = split_features_and_target(feat, target_column=TARGET_PRICE_COLUMN)
+    X, y = split_features_and_target(feat, target_column=TARGET_RETURN_COLUMN)
     feature_columns = list(X.columns)
     n = feat.height
     if n < 50:
@@ -91,11 +97,13 @@ def evaluate_loss(
 
     X_eval = scaler.transform(to_float_numpy(test_df.select(feature_columns)))
     y_pred = reg.predict(X_eval).astype(float)
-    y_true = test_df[TARGET_PRICE_COLUMN].to_numpy().astype(float)
-    today = test_df["today_adj_close"].to_numpy().astype(float)
+    y_true = test_df[TARGET_RETURN_COLUMN].to_numpy().astype(float)
+    y_true_dir = test_df[TARGET_DIRECTION_COLUMN].to_numpy().astype(int)
 
-    reg_m = regression_metrics_summary(y_true, y_pred)
-    dir_m = direction_accuracy_from_prices(y_true, y_pred, today)
+    reg_m = return_metrics_summary(y_true, y_pred)
+    dir_m = classification_metrics_summary(
+        y_true_dir, direction_from_return_predictions(y_pred)
+    )
 
     cfg = LOSS_CONFIGS[loss_key]
     row = {
@@ -104,8 +112,7 @@ def evaluate_loss(
         "objective": cfg["objective"],
         "eval_metric": cfg["eval_metric"],
         "test_rows": test_df.height,
-        "test_mae": reg_m["mae"],
-        "test_rmse": reg_m["rmse"],
+        "test_mae_return_pct": reg_m["mae_return_pct"],
         "test_mape_pct": reg_m["mape_pct"],
         "test_r2": reg_m["r2"],
         "direction_accuracy": dir_m["accuracy"],
@@ -144,7 +151,9 @@ def main() -> None:
     rows: list[dict] = []
     sym = args.ticker.upper()
     print(f"\n{sym}  period={args.period}  benchmark={args.benchmark.upper()}\n")
-    print(f"{'loss':<10} {'objective':<28} {'test_mae':>10} {'test_rmse':>10} {'dir_acc':>8} {'huber_slope':>12}")
+    print(
+        f"{'loss':<10} {'objective':<28} {'mae_ret%':>10} {'dir_acc':>8} {'huber_slope':>12}"
+    )
     print("-" * 82)
 
     for key in keys:
@@ -165,11 +174,11 @@ def main() -> None:
             hs = row.get("huber_slope")
             hs_s = f"{hs:.2f}" if hs is not None else ""
             print(
-                f"{key:<10} {row['objective']:<28} {row['test_mae']:10.4f} "
-                f"{row['test_rmse']:10.4f} {row['direction_accuracy']:8.3f} {hs_s:>12}"
+                f"{key:<10} {row['objective']:<28} {row['test_mae_return_pct']:10.4f} "
+                f"{row['direction_accuracy']:8.3f} {hs_s:>12}"
             )
 
-    print("\n(All rows report test MAE/RMSE in dollars for fair comparison, regardless of training loss.)")
+    print("\n(All rows: test MAE on next-day return, in percent points.)")
 
     if args.out:
         out_path = Path(args.out)

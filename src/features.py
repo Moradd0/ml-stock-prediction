@@ -416,10 +416,19 @@ def _merge_daily_sentiment(
     )
 
 
-# Primary regression target: next session adjusted close (known only after that session).
+# Primary regression target: next session simple return (train models on this).
+TARGET_RETURN_COLUMN = "Target_Next_Return"
+# Next session adj. close on today's row (``adj.shift(-1)``); for metrics / export.
 TARGET_PRICE_COLUMN = "Target_Next_Adj_Close"
-# Derived classification label for reporting / direction accuracy.
+# 1 if tomorrow's adj. close > today's (same rule as classification direction).
 TARGET_DIRECTION_COLUMN = "Target_Direction"
+
+# Must never appear in model inputs ``X`` (future information on today's row).
+TARGET_LABEL_COLUMNS: tuple[str, ...] = (
+    TARGET_RETURN_COLUMN,
+    TARGET_PRICE_COLUMN,
+    TARGET_DIRECTION_COLUMN,
+)
 
 
 def _ordered_unique(iterable: Iterable[str]) -> list[str]:
@@ -441,8 +450,7 @@ def engineer_features(
     use_fundamentals: bool = True,
 ) -> pl.DataFrame:
     """
-    Build leakage-safe features and price target ``Target_Next_Adj_Close`` from
-    ``fetch_aligned_market_data`` output.
+    Build leakage-safe features and targets from ``fetch_aligned_market_data`` output.
 
     Includes **Finnhub headlines** (last 30 days) scored with **ProsusAI/finbert** as
     ``Daily_Sentiment`` (daily mean of mapped scores: positive = 1, neutral = 0, negative = -1),
@@ -451,8 +459,9 @@ def engineer_features(
     Also includes **dividend / split** proxies on the target and **competitor / partner** return
     panels (see ``src.peer_maps``) when those columns are present on ``df``.
 
-    ``Target_Next_Adj_Close`` is the *next* session's ``target_Adj Close`` (regression label).
-    ``Target_Direction`` is derived (1 if next close > today). Peer inputs use only prices
+    ``Target_Next_Return`` is (close_{T+1}/close_T - 1) on row *T* (training label).
+    ``Target_Next_Adj_Close`` is next session adj. close (for evaluation / export).
+    ``Target_Direction`` is 1 if tomorrow's close > today's. Peer inputs use only prices
     through each session's close; peer
     aggregates apply ``.shift(1)`` so row ``t`` does not embed same-day peer closes in the
     contemporaneous mean (mirrors the spirit of the reference coursework pipeline).
@@ -488,6 +497,7 @@ def engineer_features(
             (bench_adj / bench_adj.shift(1) - 1.0).alias("benchmark_daily_return"),
             (macro_px / macro_px.shift(1) - 1.0).alias("treasury_yield_daily_change"),
             adj.shift(-1).alias(TARGET_PRICE_COLUMN),
+            (adj.shift(-1) / adj - 1.0).alias(TARGET_RETURN_COLUMN),
         ]
     ).with_columns(
         [
@@ -579,7 +589,7 @@ def engineer_features(
         "treasury_yield_daily_change",
     ]
 
-    target_cols = [TARGET_PRICE_COLUMN, TARGET_DIRECTION_COLUMN]
+    target_cols = [TARGET_RETURN_COLUMN, TARGET_PRICE_COLUMN, TARGET_DIRECTION_COLUMN]
     feature_cols = _ordered_unique(
         base_feature_cols + qtr_cols + div_feature_cols + comp_meta + supp_meta + target_cols
     )

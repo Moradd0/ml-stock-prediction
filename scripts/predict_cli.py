@@ -25,7 +25,9 @@ from app_api import PredictRequest, run_predict  # noqa: E402
 
 
 def _compact_payload(data: dict) -> dict:
-    out = {k: v for k, v in data.items() if k != "backtest"}
+    out = {k: v for k, v in data.items() if k not in ("backtest",)}
+    if "backtest_summary" in data:
+        out["backtest_summary"] = data["backtest_summary"]
     bt = data.get("backtest") or {}
     if not bt:
         return out

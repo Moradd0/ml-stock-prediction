@@ -79,9 +79,9 @@ flowchart LR
   FE --> API
 ```
 
-**Label:** `Target_Next_Adj_Close` = next session adjusted close (regression). Training minimizes **MAE** (mean absolute price error). **Direction** and **% change** are derived at inference from predicted vs today’s close.
+**Label:** `Target_Next_Return` = next-day simple return (train). `Target_Direction` = 1 if tomorrow’s adj. close > today’s. **Huber** loss + hyperparameter search on validation MAE; **direction threshold** tuned on validation (Up if `pred_return > threshold`, not raw `> 0`).
 
-**Inference:** Latest feature row → scaled → XGBoost regressor → predicted next price, % change, Up/Down.
+**Inference:** Predict return → `next_close ≈ today × (1 + return)` → % change and Up/Down. `/predict` includes **backtest_summary** (model vs buy-and-hold vs open→close benchmark) plus **prediction_counts** (how often the model said Up vs Down on the test window).
 
 ---
 
@@ -164,6 +164,8 @@ PYTHONPATH=. uvicorn app_api:app --reload --host 127.0.0.1 --port 8000
 | `cumulative_return_open_to_close_benchmark` | Always take next session open→close (not buy-and-hold) |
 | `cumulative_return_buy_and_hold` | Buy at first test `target_Adj Close`, sell at last (`exit/entry − 1`) |
 | `buy_and_hold_entry_date` / `exit_date` / `entry_price` / `exit_price` | Anchors for true buy-and-hold |
+| `backtest_summary.prediction_counts` | `n_predicted_up` / `n_predicted_down` on the test window |
+| `direction_threshold` | Validation-tuned cutoff for Up vs Down (saved in bundle) |
 
 ### 3. Streamlit UI
 

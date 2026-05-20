@@ -18,14 +18,21 @@ load_project_env()
 from src.data_fetch import fetch_aligned_market_data  # noqa: E402
 from src.evaluate import (  # noqa: E402
     append_next_session_prices,
-    direction_accuracy_from_prices,
-    regression_metrics_summary,
+    classification_metrics_summary,
+    direction_from_return_predictions,
+    prices_from_returns,
+    return_metrics_summary,
     run_buy_and_hold_backtest,
     run_open_to_close_backtest,
     save_model_bundle,
 )
-from src.features import TARGET_PRICE_COLUMN, engineer_features  # noqa: E402
-from src.models.regression_model import init_xgb_regressor, train_xgb_regressor  # noqa: E402
+from src.features import (  # noqa: E402
+    TARGET_DIRECTION_COLUMN,
+    TARGET_PRICE_COLUMN,
+    TARGET_RETURN_COLUMN,
+    engineer_features,
+)
+from src.models.regression_model import fit_huber_regressor_tuned  # noqa: E402
 from src.preprocess import (  # noqa: E402
     chronological_train_val_test_split,
     scale_train_val_test,
@@ -50,7 +57,7 @@ def evaluate_period(
 ) -> dict:
     raw = fetch_aligned_market_data(ticker.upper(), benchmark.upper(), period=period)
     feat = engineer_features(raw, keep_incomplete_target=False, target_ticker=ticker.upper())
-    X, y = split_features_and_target(feat, target_column=TARGET_PRICE_COLUMN)
+    X, y = split_features_and_target(feat, target_column=TARGET_RETURN_COLUMN)
     feature_columns = list(X.columns)
     n = feat.height
     if n < 50:
@@ -59,33 +66,43 @@ def evaluate_period(
     X_train, X_val, X_test, y_train, y_val, y_test = chronological_train_val_test_split(X, y)
     Xtr, Xva, Xte, scaler = scale_train_val_test(X_train, X_val, X_test)
 
-    reg = init_xgb_regressor()
-    train_xgb_regressor(
-        reg,
+    reg, tune_meta = fit_huber_regressor_tuned(
         Xtr,
         y_train,
         Xva,
         y_val,
         feature_names=feature_columns,
-        early_stopping_rounds=20,
+        tune=True,
     )
+    direction_threshold = float(tune_meta.get("direction_threshold", 0.0))
 
     i_train, i_val_end = _split_test_mask(n)
     fe = append_next_session_prices(feat, raw)
     test_df = fe[i_val_end:].drop_nulls(
         subset=feature_columns
-        + ["today_adj_close", "next_adj_close", "next_open", "next_close", TARGET_PRICE_COLUMN]
+        + [
+            "today_adj_close",
+            "next_adj_close",
+            "next_open",
+            "next_close",
+            TARGET_PRICE_COLUMN,
+            TARGET_RETURN_COLUMN,
+            TARGET_DIRECTION_COLUMN,
+        ]
     )
     if test_df.height == 0:
         return {"period": period, "error": "empty test window"}
 
     X_eval = scaler.transform(to_float_numpy(test_df.select(feature_columns)))
-    y_pred_price = reg.predict(X_eval).astype(float)
-    y_true_price = test_df[TARGET_PRICE_COLUMN].to_numpy().astype(float)
     today_adj = test_df["today_adj_close"].to_numpy().astype(float)
-    reg_m = regression_metrics_summary(y_true_price, y_pred_price)
-    dir_m = direction_accuracy_from_prices(y_true_price, y_pred_price, today_adj)
-    y_pred_dir = (y_pred_price > today_adj).astype(int)
+    y_pred_return = reg.predict(X_eval).astype(float)
+    y_true_return = test_df[TARGET_RETURN_COLUMN].to_numpy().astype(float)
+    ret_m = return_metrics_summary(y_true_return, y_pred_return)
+    y_pred_dir = direction_from_return_predictions(
+        y_pred_return, threshold=direction_threshold
+    )
+    y_true_dir = test_df[TARGET_DIRECTION_COLUMN].to_numpy().astype(int)
+    dir_m = classification_metrics_summary(y_true_dir, y_pred_dir)
     bt_occ = run_open_to_close_backtest(
         y_pred_dir,
         test_df["next_open"].to_numpy(),
@@ -102,7 +119,8 @@ def evaluate_period(
             path,
             {
                 "task": "regression",
-                "target_column": TARGET_PRICE_COLUMN,
+                "target_column": TARGET_RETURN_COLUMN,
+                "target_mode": "return",
                 "model": reg,
                 "scaler": scaler,
                 "feature_columns": feature_columns,
@@ -112,7 +130,9 @@ def evaluate_period(
                 "news_days": 365,
                 "lookback_calendar_days": 14,
                 "report_lag_days": 45,
-                "loss": "mae",
+                "loss": "huber",
+                "direction_threshold": direction_threshold,
+                "tune_meta": tune_meta,
             },
         )
         print(f"Saved {path}")
@@ -123,8 +143,7 @@ def evaluate_period(
         "test_rows": test_df.height,
         "test_start": str(dates[0]),
         "test_end": str(dates[-1]),
-        "test_mae": reg_m["mae"],
-        "test_rmse": reg_m["rmse"],
+        "test_mae_return_pct": ret_m["mae_return_pct"],
         "direction_accuracy": dir_m["accuracy"],
         "f1_up": dir_m["f1_score"],
         "return_strategy": bt_occ["cumulative_return_strategy"],
@@ -171,7 +190,8 @@ def main() -> None:
             print(f"{r['period']}: ERROR {r['error']}")
         else:
             print(
-                f"{r['period']}: mae={r['test_mae']:.3f} dir_acc={r['direction_accuracy']:.3f} f1={r['f1_up']:.3f} "
+                f"{r['period']}: mae_ret%={r['test_mae_return_pct']:.3f} "
+                f"dir_acc={r['direction_accuracy']:.3f} f1={r['f1_up']:.3f} "
                 f"test={r['test_start']}..{r['test_end']} "
                 f"strat={r['return_strategy']*100:.1f}% B&H={r['return_buy_and_hold']*100:.1f}%"
             )

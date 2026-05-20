@@ -10,6 +10,7 @@ import numpy as np
 import polars as pl
 from sklearn.metrics import (
     accuracy_score,
+    balanced_accuracy_score,
     confusion_matrix,
     f1_score,
     precision_score,
@@ -65,6 +66,173 @@ def regression_to_user_outputs(
         "prediction": "Up" if direction == 1 else "Down",
         "direction": direction,
     }
+
+
+def return_to_user_outputs(
+    predicted_return: float,
+    today_adj_close: float,
+    *,
+    max_abs_return: float = 0.15,
+    direction_threshold: float = 0.0,
+) -> dict[str, Any]:
+    """
+    Map predicted next-day simple return to price / direction (UI).
+
+    ``max_abs_return`` clamps the return used for display (default ±15%) for plausibility.
+    Direction uses ``predicted_return > direction_threshold`` (threshold tuned on validation).
+    """
+    today = float(today_adj_close)
+    r = float(predicted_return)
+    r_display = float(np.clip(r, -max_abs_return, max_abs_return))
+    pred_price = today * (1.0 + r_display) if today > 0 else 0.0
+    pct = r_display * 100.0
+    direction = 1 if r > direction_threshold else 0
+    out = {
+        "predicted_next_return": round(r, 6),
+        "predicted_next_close": round(pred_price, 4),
+        "predicted_pct_change": round(pct, 4),
+        "prediction": "Up" if direction == 1 else "Down",
+        "direction": direction,
+    }
+    if abs(r - r_display) > 1e-9:
+        out["display_clamped"] = True
+    return out
+
+
+def return_metrics_summary(
+    y_true_return: np.ndarray | pl.Series,
+    y_pred_return: np.ndarray | pl.Series,
+) -> dict[str, Any]:
+    """MAE / RMSE on simple returns; MAE in percent points (×100)."""
+    yt = np.asarray(y_true_return, dtype=float).ravel()
+    yp = np.asarray(y_pred_return, dtype=float).ravel()
+    err = yp - yt
+    mae = float(np.mean(np.abs(err)))
+    rmse = float(np.sqrt(np.mean(err**2)))
+    return {
+        "mae_return": mae,
+        "mae_return_pct": mae * 100.0,
+        "rmse_return": rmse,
+        "mean_signed_error_return": float(np.mean(err)),
+    }
+
+
+def direction_from_return_predictions(
+    y_pred_return: np.ndarray,
+    *,
+    threshold: float = 0.0,
+) -> np.ndarray:
+    """Up (1) if predicted return is strictly above ``threshold``."""
+    return (np.asarray(y_pred_return, dtype=float).ravel() > float(threshold)).astype(int)
+
+
+def prediction_counts_summary(y_pred_dir: np.ndarray | pl.Series) -> dict[str, Any]:
+    """Counts of Up / Down predictions for backtest reporting."""
+    y = np.asarray(y_pred_dir, dtype=int).ravel()
+    n = int(y.size)
+    n_up = int(np.sum(y == 1))
+    n_down = int(np.sum(y == 0))
+    return {
+        "n_predicted_up": n_up,
+        "n_predicted_down": n_down,
+        "n_total": n,
+        "pct_predicted_up": round(100.0 * n_up / n, 2) if n else 0.0,
+        "pct_predicted_down": round(100.0 * n_down / n, 2) if n else 0.0,
+    }
+
+
+def threshold_for_predicted_up_rate(
+    y_pred_return: np.ndarray | pl.Series,
+    target_up_frac: float,
+) -> float:
+    """Threshold ``t`` so about ``target_up_frac`` of rows have ``pred_return > t`` (ties-aware)."""
+    y = np.sort(np.asarray(y_pred_return, dtype=float).ravel())
+    n = y.size
+    if n == 0:
+        return 0.0
+    n_up = int(round(float(target_up_frac) * n))
+    n_up = max(1, min(n - 1, n_up))
+    idx = n - n_up - 1
+    t = float(y[idx])
+    if idx + 1 < n and y[idx + 1] <= t:
+        t = np.nextafter(t, -np.inf)
+    return t
+
+
+def tune_direction_threshold(
+    y_true_dir: np.ndarray | pl.Series,
+    y_pred_return: np.ndarray | pl.Series,
+    *,
+    up_rate_tolerance: float = 0.12,
+    min_up_frac: float = 0.20,
+    max_up_frac: float = 0.80,
+) -> tuple[float, dict[str, Any]]:
+    """
+    Pick ``threshold`` so ``pred_return > threshold`` maximizes validation balanced accuracy.
+
+    Keeps the predicted Up rate near the validation label Up rate (± ``up_rate_tolerance``),
+    so the model does not collapse to always-Up or always-Down. Falls back to the prediction
+    median if no percentile threshold qualifies.
+    """
+    yt = np.asarray(y_true_dir, dtype=int).ravel()
+    yp = np.asarray(y_pred_return, dtype=float).ravel()
+    if yt.shape != yp.shape:
+        raise ValueError("y_true_dir and y_pred_return must have the same length.")
+    n = yp.size
+    if n == 0:
+        return 0.0, {"val_balanced_accuracy": float("nan"), "n_candidates": 0}
+
+    true_up_frac = float(np.mean(yt == 1))
+    up_lo = max(min_up_frac, true_up_frac - up_rate_tolerance)
+    up_hi = min(max_up_frac, true_up_frac + up_rate_tolerance)
+
+    percentiles = np.linspace(5.0, 95.0, 19)
+    candidates = sorted(
+        {float(np.percentile(yp, p)) for p in percentiles}
+        | {0.0, threshold_for_predicted_up_rate(yp, true_up_frac)}
+    )
+
+    best_t = 0.0
+    best_ba = -1.0
+    best_counts: dict[str, Any] = {}
+
+    for t in candidates:
+        pred = (yp > t).astype(int)
+        counts = prediction_counts_summary(pred)
+        up_frac = counts["n_predicted_up"] / n
+        if up_frac < up_lo or up_frac > up_hi:
+            continue
+        ba = float(balanced_accuracy_score(yt, pred))
+        if ba > best_ba:
+            best_ba = ba
+            best_t = t
+            best_counts = counts
+
+    if best_ba < 0.0:
+        best_t = threshold_for_predicted_up_rate(yp, true_up_frac)
+        pred = (yp > best_t).astype(int)
+        best_ba = float(balanced_accuracy_score(yt, pred))
+        best_counts = prediction_counts_summary(pred)
+        fallback = "quantile_match_label_rate"
+    else:
+        fallback = None
+
+    meta = {
+        "val_balanced_accuracy": best_ba,
+        "val_accuracy": float(accuracy_score(yt, (yp > best_t).astype(int))),
+        "val_true_up_frac": round(true_up_frac, 4),
+        "val_target_up_frac_range": [round(up_lo, 4), round(up_hi, 4)],
+        "n_candidates": len(candidates),
+        "threshold_fallback": fallback,
+        **best_counts,
+    }
+    return best_t, meta
+
+
+def prices_from_returns(today_adj_close: np.ndarray, y_return: np.ndarray) -> np.ndarray:
+    today = np.asarray(today_adj_close, dtype=float).ravel()
+    r = np.asarray(y_return, dtype=float).ravel()
+    return today * (1.0 + r)
 
 
 def direction_accuracy_from_prices(
@@ -181,16 +349,18 @@ def run_open_to_close_backtest(
 
     eq_s = initial_capital * np.cumprod(1.0 + r_strat)
     eq_benchmark = initial_capital * np.cumprod(1.0 + r_benchmark)
+    final_s = float(eq_s[-1])
+    final_b = float(eq_benchmark[-1])
 
     return {
         "daily_returns_strategy": r_strat.astype(float).tolist(),
         "daily_returns_open_to_close_benchmark": r_benchmark.astype(float).tolist(),
         "equity_strategy": eq_s.astype(float).tolist(),
         "equity_open_to_close_benchmark": eq_benchmark.astype(float).tolist(),
-        "cumulative_return_strategy": float(eq_s[-1] / initial_capital - 1.0),
-        "cumulative_return_open_to_close_benchmark": float(
-            eq_benchmark[-1] / initial_capital - 1.0
-        ),
+        "cumulative_return_strategy": float(final_s / initial_capital - 1.0),
+        "cumulative_return_open_to_close_benchmark": float(final_b / initial_capital - 1.0),
+        "final_capital_strategy": final_s,
+        "final_capital_open_to_close_benchmark": final_b,
         "sharpe_annualized_strategy": annualized_sharpe(r_strat, periods_per_year=periods_per_year),
         "max_drawdown_strategy": max_drawdown_from_equity(eq_s),
     }
@@ -253,18 +423,73 @@ def run_buy_and_hold_backtest(
     r_cc = np.zeros(px.size, dtype=float)
     r_cc[1:] = px[1:] / px[:-1] - 1.0
 
+    final_bh = float(eq[-1])
     return {
         "buy_and_hold_entry_date": entry_d.isoformat() if hasattr(entry_d, "isoformat") else str(entry_d),
         "buy_and_hold_exit_date": exit_d.isoformat() if hasattr(exit_d, "isoformat") else str(exit_d),
         "buy_and_hold_entry_price": entry_p,
         "buy_and_hold_exit_price": exit_p,
         "cumulative_return_buy_and_hold": float(exit_p / entry_p - 1.0),
+        "final_capital_buy_and_hold": final_bh,
         "equity_buy_and_hold": eq.astype(float).tolist(),
         "sharpe_annualized_buy_and_hold": annualized_sharpe(
             r_cc[1:], periods_per_year=periods_per_year
         ),
         "max_drawdown_buy_and_hold": max_drawdown_from_equity(eq),
     }
+
+
+def build_backtest_summary(
+    bt_model: dict[str, Any],
+    bt_buy_hold: dict[str, Any],
+    *,
+    initial_capital: float = 10_000.0,
+    test_sessions: int | None = None,
+    prediction_counts: dict[str, Any] | None = None,
+    direction_threshold: float | None = None,
+) -> dict[str, Any]:
+    """
+    Human-readable backtest block for API / CLI (percent returns and final capital).
+    """
+    ret_s = float(bt_model.get("cumulative_return_strategy", 0.0)) * 100.0
+    ret_bh = float(bt_buy_hold.get("cumulative_return_buy_and_hold", 0.0)) * 100.0
+    ret_occ = float(bt_model.get("cumulative_return_open_to_close_benchmark", 0.0)) * 100.0
+
+    strategies = [
+        {
+            "name": "Model strategy",
+            "description": "If predicted Up: earn next session open→close return; else cash.",
+            "return_pct": round(ret_s, 2),
+            "final_capital": round(float(bt_model.get("final_capital_strategy", initial_capital)), 2),
+        },
+        {
+            "name": "Buy and hold",
+            "description": "Hold target stock from first to last test session (adj. close).",
+            "return_pct": round(ret_bh, 2),
+            "final_capital": round(
+                float(bt_buy_hold.get("final_capital_buy_and_hold", initial_capital)), 2
+            ),
+        },
+        {
+            "name": "Open-to-close every day",
+            "description": "Benchmark: take every next-session open→close return (always invested intraday).",
+            "return_pct": round(ret_occ, 2),
+            "final_capital": round(
+                float(bt_model.get("final_capital_open_to_close_benchmark", initial_capital)), 2
+            ),
+        },
+    ]
+    out: dict[str, Any] = {
+        "initial_capital": initial_capital,
+        "strategies": strategies,
+    }
+    if test_sessions is not None:
+        out["test_sessions"] = test_sessions
+    if prediction_counts is not None:
+        out["prediction_counts"] = prediction_counts
+    if direction_threshold is not None:
+        out["direction_threshold"] = round(float(direction_threshold), 8)
+    return out
 
 
 def save_model_bundle(path: str | Path, bundle: dict[str, Any]) -> Path:

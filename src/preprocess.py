@@ -9,7 +9,7 @@ import numpy as np
 import polars as pl
 from sklearn.preprocessing import StandardScaler
 
-from src.features import TARGET_PRICE_COLUMN
+from src.features import TARGET_LABEL_COLUMNS, TARGET_RETURN_COLUMN
 
 _RAW_FIELD_NAMES = frozenset({"Open", "High", "Low", "Close", "Volume", "Adj Close"})
 
@@ -31,15 +31,14 @@ def _raw_price_columns(names: Iterable[str]) -> list[str]:
 def split_features_and_target(
     df: pl.DataFrame,
     *,
-    target_column: str = TARGET_PRICE_COLUMN,
+    target_column: str = TARGET_RETURN_COLUMN,
     date_column: str = "Date",
 ) -> tuple[pl.DataFrame, pl.Series]:
     """
     Split ``df`` into feature matrix ``X`` and target ``y``.
 
-    ``X`` excludes the target column, the date column (if present), and any raw OHLCV-style
-    columns (e.g. ``Open``, ``target_Adj Close``, ``benchmark_Close``) so models use only
-    stationary engineered inputs.
+    ``X`` excludes **all** label columns (``TARGET_LABEL_COLUMNS``), the date column, and raw
+    OHLCV columns so models never see tomorrow's close or direction as inputs.
 
     Rows are sorted by ``date_column`` when that column exists, so row order is chronological.
     """
@@ -48,14 +47,21 @@ def split_features_and_target(
 
     ordered = df.sort(date_column) if date_column in df.columns else df
 
-    drop_cols = {target_column}
+    drop_cols = set(TARGET_LABEL_COLUMNS)
+    drop_cols.add(target_column)
     if date_column in ordered.columns:
         drop_cols.add(date_column)
     drop_cols.update(_raw_price_columns(ordered.columns))
 
     feature_names = [c for c in ordered.columns if c not in drop_cols]
     if not feature_names:
-        raise ValueError("No feature columns left after dropping target, date, and raw prices.")
+        raise ValueError(
+            "No feature columns left after dropping target, date, and raw prices."
+        )
+
+    leaked = [c for c in TARGET_LABEL_COLUMNS if c in feature_names]
+    if leaked:
+        raise ValueError(f"Label columns must not be model inputs: {leaked}")
 
     X = ordered.select(feature_names)
     y = ordered[target_column]
@@ -77,7 +83,9 @@ def chronological_train_val_test_split(
     validation, and the remainder for testing. Indices are computed from ``int(n * frac)``
     so the test block absorbs any rounding remainder.
     """
-    if not math.isclose(train_fraction + val_fraction + test_fraction, 1.0, rel_tol=1e-6):
+    if not math.isclose(
+        train_fraction + val_fraction + test_fraction, 1.0, rel_tol=1e-6
+    ):
         raise ValueError(
             "train_fraction, val_fraction, and test_fraction must sum to 1.0; "
             f"got {train_fraction + val_fraction + test_fraction}."
